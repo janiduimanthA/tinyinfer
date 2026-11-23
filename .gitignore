@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Model weights (too large for GitHub, regenerate with scripts/export_weights.py)
+weights/
