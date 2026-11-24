@@ -8,6 +8,7 @@ import numpy as np
 import math
 
 from reference.ops import gelu, layer_norm, linear, softmax
+from reference.sampling import sample_next
 
 
 def attention(x, p, n_head):
@@ -95,10 +96,16 @@ class GPT2:
         x = layer_norm(x, self.ln_f_g, self.ln_f_b)   # final LayerNorm
         return x @ self.wte.T                         # lm_head (tied to wte)
 
-    def generate(self, ids, max_new_tokens):
-        """Greedy decoding: always pick the highest-scoring next token."""
+    def stream(self, ids, max_new_tokens, temperature=0.0, top_k=None, top_p=None, seed=None):
+        """Yield new token IDs one at a time. temperature=0 means greedy."""
         ids = list(ids)
+        rng = np.random.default_rng(seed)
         for _ in range(max_new_tokens):
             logits = self.forward(ids[-self.block_size:])
-            ids.append(int(np.argmax(logits[-1])))
-        return ids
+            next_id = sample_next(logits[-1], temperature, top_k, top_p, rng)
+            ids.append(next_id)
+            yield next_id
+
+    def generate(self, ids, max_new_tokens, **sampling):
+        """Return prompt + generated token IDs (greedy unless sampling options are given)."""
+        return list(ids) + list(self.stream(ids, max_new_tokens, **sampling))
