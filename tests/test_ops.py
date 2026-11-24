@@ -43,3 +43,12 @@ def test_layer_norm():
         torch.from_numpy(x), (768,), torch.from_numpy(g), torch.from_numpy(b), eps=1e-5
     ).numpy()
     np.testing.assert_allclose(layer_norm(x, g, b), expected, atol=1e-4)
+
+def test_ops_keep_float32():
+    """Regression test: a stray np.float64 constant once silently upcast everything."""
+    x = rng.standard_normal((4, 8)).astype(np.float32)
+    g = np.ones(8, dtype=np.float32)
+    b = np.zeros(8, dtype=np.float32)
+    assert gelu(x).dtype == np.float32
+    assert softmax(x).dtype == np.float32
+    assert layer_norm(x, g, b).dtype == np.float32

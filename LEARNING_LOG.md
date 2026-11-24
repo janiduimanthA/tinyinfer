@@ -34,3 +34,19 @@
 - **Residual:** `x = x + f(x)`. Instead of replacing old information, new information is **added** to it. Makes deep networks trainable.
 - **LayerNorm:** Normalizes each token's vector to mean 0 and variance 1, then scales by a learned weight and adds a learned bias. Keeps numbers stable.
 - **One Transformer Block:**
+
+## Day 2: NumPy GPT-2 engine
+
+### What I built
+- Exported GPT-2 weights to NumPy (124.4M params, no PyTorch needed at runtime)
+- Implemented ops (linear, gelu, softmax, layer_norm), each tested against PyTorch
+- Implemented causal multi-head attention, with property tests proving it never sees the future
+- Assembled the full GPT-2 forward pass and greedy generation
+- **Matches Hugging Face GPT-2: max logit diff ~1e-4, identical greedy outputs** 🎉
+- Baseline speed: X.X tokens/s
+
+### Key insights
+- Softmax subtracts the max first, so exp() never overflows (numerical stability)
+- Heads are split with reshape + transpose, with no loops (like cutting a cake 🍰)
+- Floating-point results are never bit-identical across libraries, so tests use a tolerance
+- Generation gets slower as the sequence grows, because every step recomputes everything → KV cache will fix this

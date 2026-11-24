@@ -4,6 +4,7 @@ Basic building blocks for GPT-2, in pure NumPy.
 Every function works on the last axis, so it handles any shape (T, C), (B, T, C), etc.
 """
 import numpy as np
+import math
 
 
 def linear(x, w, b):
@@ -16,9 +17,13 @@ def linear(x, w, b):
     return x @ w + b
 
 
+# Plain Python float (not np.float64), so float32 arrays stay float32 under NumPy 2
+_GELU_C = math.sqrt(2.0 / math.pi)
+
+
 def gelu(x):
     """GELU activation, tanh approximation (the version GPT-2 uses)."""
-    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)))
+    return 0.5 * x * (1.0 + np.tanh(_GELU_C * (x + 0.044715 * x**3)))
 
 
 def softmax(x):
