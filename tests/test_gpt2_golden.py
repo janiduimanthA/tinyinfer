@@ -44,3 +44,12 @@ def test_greedy_generation_matches_golden(model, golden, i):
     expected = golden[f"greedy_{i}"].tolist()
     got = model.generate(ids, max_new_tokens=len(expected) - len(ids))
     assert got == expected                                 # exact same 20 tokens
+
+@pytest.mark.parametrize("i", [0, 1, 2])
+def test_last_only_matches_full(model, golden, i):
+    """The last_only optimization must give the same last-position logits as a full forward."""
+    ids = golden[f"ids_{i}"]
+    full = model.forward(ids)
+    last = model.forward(ids, last_only=True)
+    assert last.shape == (1, full.shape[1])
+    np.testing.assert_allclose(last[0], full[-1], atol=1e-4)

@@ -26,6 +26,7 @@ OUT_PATH = Path("benchmarks/reference_numpy.json")
 # Each variant is one way of running a decode step. Add new ones as the engine improves.
 VARIANTS = {
     "full": lambda model, ids: model.forward(ids),
+    "last_only": lambda model, ids: model.forward(ids, last_only=True),
 }
 
 

@@ -83,8 +83,15 @@ class GPT2:
                 {k[len(prefix):]: w[k] for k in w.files if k.startswith(prefix)}
             )
 
-    def forward(self, ids):
-        """ids: T token IDs -> logits of shape (T, vocab)."""
+    def forward(self, ids, last_only=False):
+        """
+        ids: T token IDs -> logits of shape (T, vocab), or (1, vocab) if last_only.
+
+        During generation only the last position's logits are needed. ln_f and lm_head
+        treat each position independently, so with last_only we drop the other positions
+        right after the blocks and skip most of the expensive (768 x 50257) lm_head matmul.
+        Attention mixes positions, so the blocks must still see the whole sequence.
+        """
         ids = np.asarray(ids)
         T = len(ids)
         if T > self.block_size:
@@ -93,15 +100,17 @@ class GPT2:
         x = self.wte[ids] + self.wpe[np.arange(T)]   # token + position embeddings
         for p in self.blocks:                         # 12 transformer blocks
             x = block(x, p, self.n_head)
+        if last_only:
+            x = x[-1:]                                # keep only the last position: (1, C)
         x = layer_norm(x, self.ln_f_g, self.ln_f_b)   # final LayerNorm
-        return x @ self.wte.T                         # lm_head (tied to wte)
+        return x @ self.wte.T                         # lm_head (tied to wte)                        # lm_head (tied to wte)
 
     def stream(self, ids, max_new_tokens, temperature=0.0, top_k=None, top_p=None, seed=None):
         """Yield new token IDs one at a time. temperature=0 means greedy."""
         ids = list(ids)
         rng = np.random.default_rng(seed)
         for _ in range(max_new_tokens):
-            logits = self.forward(ids[-self.block_size:])
+            logits = self.forward(ids[-self.block_size:], last_only=True)
             next_id = sample_next(logits[-1], temperature, top_k, top_p, rng)
             ids.append(next_id)
             yield next_id
