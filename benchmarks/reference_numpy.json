@@ -1,0 +1,28 @@
+{
+  "machine": "Intel64 Family 6 Model 186 Stepping 3, GenuineIntel",
+  "python": "3.13.5",
+  "numpy": "2.5.4",
+  "repeats": 5,
+  "results": [
+    {
+      "context": 8,
+      "full": 46.14179994678125
+    },
+    {
+      "context": 32,
+      "full": 103.79629995441064
+    },
+    {
+      "context": 64,
+      "full": 147.64029998332262
+    },
+    {
+      "context": 128,
+      "full": 289.6040999912657
+    },
+    {
+      "context": 256,
+      "full": 626.544600003399
+    }
+  ]
+}
