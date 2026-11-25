@@ -60,6 +60,69 @@ def block(x, p, n_head):
     x = x + mlp(layer_norm(x, p["ln_2.weight"], p["ln_2.bias"]), p)
     return x
 
+class KVCache:
+    """
+    Stores K and V for every layer, so past tokens are never recomputed.
+
+    Pre-allocated to the full block size (like real engines do), with `length`
+    tracking how many positions are filled. GPT-2 at 1024 tokens: ~75 MB.
+    """
+
+    def __init__(self, n_layer, n_head, block_size, head_size):
+        shape = (n_layer, n_head, block_size, head_size)
+        self.k = np.zeros(shape, dtype=np.float32)
+        self.v = np.zeros(shape, dtype=np.float32)
+        self.length = 0  # number of positions already stored
+
+    @property
+    def nbytes(self):
+        return self.k.nbytes + self.v.nbytes
+
+
+def attention_cached(x, p, n_head, k_cache, v_cache, start):
+    """
+    Causal self-attention for NEW tokens only, reading past K/V from the cache.
+
+    x: (T, C) new tokens at absolute positions start .. start+T-1.
+    k_cache, v_cache: this layer's cache, shape (n_head, block_size, hs). Updated in place.
+    """
+    T, C = x.shape
+    hs = C // n_head
+    end = start + T
+
+    # 1. Q, K, V for the new tokens only
+    qkv = linear(x, p["attn.c_attn.weight"], p["attn.c_attn.bias"])
+    q, k, v = np.split(qkv, 3, axis=-1)
+    q = q.reshape(T, n_head, hs).transpose(1, 0, 2)  # (n_head, T, hs)
+    k = k.reshape(T, n_head, hs).transpose(1, 0, 2)
+    v = v.reshape(T, n_head, hs).transpose(1, 0, 2)
+
+    # 2. Save the new K, V into the cache, then read back ALL keys/values so far
+    k_cache[:, start:end] = k
+    v_cache[:, start:end] = v
+    K = k_cache[:, :end]  # (n_head, end, hs)
+    V = v_cache[:, :end]
+
+    # 3. New queries vs all keys
+    att = (q @ K.transpose(0, 2, 1)) / math.sqrt(hs)  # (n_head, T, end)
+
+    # 4. Causal mask: new token i sits at position start+i and may see keys 0 .. start+i
+    mask = np.arange(end)[None, :] > (start + np.arange(T))[:, None]  # (T, end)
+    att = np.where(mask, -np.inf, att)
+
+    # 5. Weighted mix of values, merge heads, output projection
+    att = softmax(att)
+    out = (att @ V).transpose(1, 0, 2).reshape(T, C)
+    return linear(out, p["attn.c_proj.weight"], p["attn.c_proj.bias"])
+
+
+def block_cached(x, p, n_head, k_cache, v_cache, start):
+    """One transformer block for new tokens, using this layer's KV cache."""
+    a = layer_norm(x, p["ln_1.weight"], p["ln_1.bias"])
+    x = x + attention_cached(a, p, n_head, k_cache, v_cache, start)
+    x = x + mlp(layer_norm(x, p["ln_2.weight"], p["ln_2.bias"]), p)
+    return x
+
 
 class GPT2:
     """GPT-2 (124M) inference engine in pure NumPy."""
@@ -103,16 +166,56 @@ class GPT2:
         if last_only:
             x = x[-1:]                                # keep only the last position: (1, C)
         x = layer_norm(x, self.ln_f_g, self.ln_f_b)   # final LayerNorm
-        return x @ self.wte.T                         # lm_head (tied to wte)                        # lm_head (tied to wte)
+        return x @ self.wte.T                         # lm_head (tied to wte)         
+        
+    def new_cache(self):
+        """An empty KV cache sized for this model."""
+        head_size = self.wte.shape[1] // self.n_head
+        return KVCache(len(self.blocks), self.n_head, self.block_size, head_size)
 
-    def stream(self, ids, max_new_tokens, temperature=0.0, top_k=None, top_p=None, seed=None):
-        """Yield new token IDs one at a time. temperature=0 means greedy."""
+    def forward_cached(self, ids, cache):
+        """
+        Process only the NEW tokens `ids`, reading and updating the KV cache.
+
+        Prefill: pass the whole prompt once. Decode: pass one token at a time.
+        Returns logits for the last position only: (1, vocab).
+        """
+        ids = np.asarray(ids)
+        T = len(ids)
+        start = cache.length
+        if start + T > self.block_size:
+            raise ValueError(f"KV cache full: {start} + {T} tokens exceeds block size {self.block_size}")
+
+        # Positions continue from where the cache left off (NOT from 0!)
+        x = self.wte[ids] + self.wpe[np.arange(start, start + T)]
+        for layer, p in enumerate(self.blocks):
+            x = block_cached(x, p, self.n_head, cache.k[layer], cache.v[layer], start)
+        cache.length += T
+
+        x = layer_norm(x[-1:], self.ln_f_g, self.ln_f_b)  # last position only
+        return x @ self.wte.T               # lm_head (tied to wte)
+
+    def stream(self, ids, max_new_tokens, temperature=0.0, top_k=None, top_p=None,
+               seed=None, use_cache=True):
+        """
+        Yield new token IDs one at a time. temperature=0 means greedy.
+
+        With use_cache (default), the prompt is processed once (prefill), then each
+        step processes only the single newest token (decode).
+        """
         ids = list(ids)
         rng = np.random.default_rng(seed)
+        cache = self.new_cache() if use_cache else None
+        pending = list(ids)  # tokens the model hasn't processed yet
+
         for _ in range(max_new_tokens):
-            logits = self.forward(ids[-self.block_size:], last_only=True)
+            if use_cache:
+                logits = self.forward_cached(pending, cache)  # prefill first, then 1 token
+            else:
+                logits = self.forward(ids[-self.block_size:], last_only=True)
             next_id = sample_next(logits[-1], temperature, top_k, top_p, rng)
             ids.append(next_id)
+            pending = [next_id]
             yield next_id
 
     def generate(self, ids, max_new_tokens, **sampling):

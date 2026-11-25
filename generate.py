@@ -24,6 +24,7 @@ def main():
     parser.add_argument("-p", "--top-p", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None, help="random seed for reproducible output")
     parser.add_argument("--greedy", action="store_true", help="always pick the top token")
+    parser.add_argument("--no-cache", action="store_true", help="disable the KV cache (slow, for comparison)")
     args = parser.parse_args()
 
     enc = tiktoken.get_encoding("gpt2")
@@ -38,6 +39,7 @@ def main():
         top_k=args.top_k,
         top_p=args.top_p,
         seed=args.seed,
+        use_cache=not args.no_cache,
     )
 
     ids = enc.encode(args.prompt)
