@@ -50,3 +50,20 @@
 - Heads are split with reshape + transpose, with no loops (like cutting a cake 🍰)
 - Floating-point results are never bit-identical across libraries, so tests use a tolerance
 - Generation gets slower as the sequence grows, because every step recomputes everything → KV cache will fix this
+
+## Day 3: Sampling, streaming, benchmarking
+
+### What I built
+- Temperature, top-k and top-p sampling, with property tests (randomness tested by rules)
+- Seeded RNG for reproducible sampling
+- Streaming output with Python generators (`yield`)
+- A benchmark harness: warm-up, repeats, median, saved as JSON with machine info
+- First optimization: compute lm_head logits only for the last position
+
+### Key insights
+- Greedy decoding loops ("cricketing prowess" x3). Sampling fixes it.
+- Low temperature = safe but repetitive; high temperature = creative but weird
+- A single timing is meaningless: my laptop gave 3.0 to 9.3 tokens/s for the same code
+- Step time grows linearly with context because everything is recomputed
+- Only position-independent layers (ln_f, lm_head) can drop positions. Attention can't,
+  because it mixes positions. Caching K and V is how blocks can skip the past too.
