@@ -221,3 +221,6 @@ __marimo__/
 
 # Model weights (too large for GitHub, regenerate with scripts/export_weights.py)
 weights/
+
+# Evaluation text (downloaded by eval_quant.py)
+data/

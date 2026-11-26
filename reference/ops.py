@@ -50,3 +50,8 @@ def layer_norm(x, g, b, eps=1e-5):
     mean = np.mean(x, axis=-1, keepdims=True)
     var = np.var(x, axis=-1, keepdims=True)
     return g * (x - mean) / np.sqrt(var + eps) + b
+
+def log_softmax(x):
+    """log(softmax(x)) along the last axis, computed stably: x - max - log(sum(exp(x - max)))."""
+    x = x - np.max(x, axis=-1, keepdims=True)
+    return x - np.log(np.sum(np.exp(x), axis=-1, keepdims=True))
