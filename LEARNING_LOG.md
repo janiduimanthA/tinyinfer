@@ -67,3 +67,23 @@
 - Step time grows linearly with context because everything is recomputed
 - Only position-independent layers (ln_f, lm_head) can drop positions. Attention can't,
   because it mixes positions. Caching K and V is how blocks can skip the past too.
+
+## Day 4: KV cache
+
+### What I built
+- A pre-allocated KV cache: (layers, heads, 1024, head_size) for K and V, ~75 MB
+- Cached attention for new tokens with a rectangular (T x end) causal mask
+- Prefill + decode generation in a single loop (`pending` tokens)
+- Tests: prefill vs full, token-by-token vs full (every step), cached vs uncached generation
+- Moved shared fixtures into conftest.py (model loaded once per test session)
+- Result: 5.5 → 21.1 tokens/s for 100 tokens (3.8x), identical text
+
+### Key insights
+- Causal attention means past K/V never change, so they can be cached
+- Cache K and V, not Q: past queries only produced past outputs, which are done
+- Positions must continue from cache.length, not restart at 0 (easy bug!)
+- MLP and LayerNorm need no cache: they're per-token. Only attention mixes tokens.
+- Speedup grows with length: uncached cost grows with context, cached cost stays ~flat
+- KV cache trades memory for speed. For big models with many users, the cache can be
+  5x bigger than the model → PagedAttention (vLLM), GQA, KV quantization
+- Industry terms: TTFT (time to first token = prefill), TPOT (time per output token = decode)
