@@ -4,11 +4,16 @@ GPT-2 forward pass in pure NumPy.
 This is the "golden" Python reference engine: simple, readable, and correct.
 Every faster engine we build later is tested against this one.
 """
-import numpy as np
 import math
 
+import numpy as np
+
 from reference.ops import gelu, layer_norm, linear, softmax
+from reference.quant import QTensor, quantize
 from reference.sampling import sample_next
+
+# Matmul weights inside each block that get INT8-quantized (biases and LayerNorms stay float32)
+QUANT_KEYS = ("attn.c_attn.weight", "attn.c_proj.weight", "mlp.c_fc.weight", "mlp.c_proj.weight")
 
 
 def attention(x, p, n_head):
@@ -28,7 +33,6 @@ def attention(x, p, n_head):
     q = q.reshape(T, n_head, hs).transpose(1, 0, 2)
     k = k.reshape(T, n_head, hs).transpose(1, 0, 2)
     v = v.reshape(T, n_head, hs).transpose(1, 0, 2)
-
 
     # 3. Scores: how well each query matches each key, scaled by sqrt(hs)
     att = (q @ k.transpose(0, 2, 1)) / math.sqrt(hs)                    # (n_head, T, T)
@@ -59,6 +63,7 @@ def block(x, p, n_head):
     x = x + attention(layer_norm(x, p["ln_1.weight"], p["ln_1.bias"]), p, n_head)
     x = x + mlp(layer_norm(x, p["ln_2.weight"], p["ln_2.bias"]), p)
     return x
+
 
 class KVCache:
     """
@@ -127,7 +132,7 @@ def block_cached(x, p, n_head, k_cache, v_cache, start):
 class GPT2:
     """GPT-2 (124M) inference engine in pure NumPy."""
 
-    def __init__(self, weights_path="weights/gpt2.npz", n_layer=12, n_head=12):
+    def __init__(self, weights_path="weights/gpt2.npz", n_layer=12, n_head=12, int8=False):
         w = np.load(weights_path)
         self.n_head = n_head
 
@@ -146,6 +151,32 @@ class GPT2:
                 {k[len(prefix):]: w[k] for k in w.files if k.startswith(prefix)}
             )
 
+        if int8:
+            self.wte = quantize(self.wte, axis=0)      # one scale per token row
+            for p in self.blocks:
+                for key in QUANT_KEYS:
+                    p[key] = quantize(p[key], axis=1)  # one scale per output column
+
+    def _embed(self, ids):
+        """Token embedding lookup, from float32 or INT8 (per-row scale) weights."""
+        if isinstance(self.wte, QTensor):
+            return self.wte.q[ids].astype(np.float32) * self.wte.scale[ids][:, None]
+        return self.wte[ids]
+
+    def _lm_head(self, x):
+        """Logits via the tied embedding table: x @ wte.T."""
+        if isinstance(self.wte, QTensor):
+            return (x @ self.wte.q.T) * self.wte.scale  # per-row scale = per-vocab-column here
+        return x @ self.wte.T
+
+    @property
+    def nbytes(self):
+        """Bytes used by all weights in memory."""
+        total = self.wte.nbytes + self.wpe.nbytes + self.ln_f_g.nbytes + self.ln_f_b.nbytes
+        for p in self.blocks:
+            total += sum(w.nbytes for w in p.values())
+        return total
+
     def forward(self, ids, last_only=False):
         """
         ids: T token IDs -> logits of shape (T, vocab), or (1, vocab) if last_only.
@@ -160,14 +191,14 @@ class GPT2:
         if T > self.block_size:
             raise ValueError(f"sequence length {T} exceeds block size {self.block_size}")
 
-        x = self.wte[ids] + self.wpe[np.arange(T)]   # token + position embeddings
-        for p in self.blocks:                         # 12 transformer blocks
+        x = self._embed(ids) + self.wpe[np.arange(T)]   # token + position embeddings
+        for p in self.blocks:                            # 12 transformer blocks
             x = block(x, p, self.n_head)
         if last_only:
-            x = x[-1:]                                # keep only the last position: (1, C)
-        x = layer_norm(x, self.ln_f_g, self.ln_f_b)   # final LayerNorm
-        return x @ self.wte.T                         # lm_head (tied to wte)         
-        
+            x = x[-1:]                                   # keep only the last position: (1, C)
+        x = layer_norm(x, self.ln_f_g, self.ln_f_b)      # final LayerNorm
+        return self._lm_head(x)                          # lm_head (tied to wte)
+
     def new_cache(self):
         """An empty KV cache sized for this model."""
         head_size = self.wte.shape[1] // self.n_head
@@ -187,13 +218,13 @@ class GPT2:
             raise ValueError(f"KV cache full: {start} + {T} tokens exceeds block size {self.block_size}")
 
         # Positions continue from where the cache left off (NOT from 0!)
-        x = self.wte[ids] + self.wpe[np.arange(start, start + T)]
+        x = self._embed(ids) + self.wpe[np.arange(start, start + T)]
         for layer, p in enumerate(self.blocks):
             x = block_cached(x, p, self.n_head, cache.k[layer], cache.v[layer], start)
         cache.length += T
 
         x = layer_norm(x[-1:], self.ln_f_g, self.ln_f_b)  # last position only
-        return x @ self.wte.T               # lm_head (tied to wte)
+        return self._lm_head(x)                           # lm_head (tied to wte)
 
     def stream(self, ids, max_new_tokens, temperature=0.0, top_k=None, top_p=None,
                seed=None, use_cache=True):

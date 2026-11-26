@@ -21,3 +21,9 @@ def model():
 @pytest.fixture(scope="session")
 def golden():
     return np.load(GOLDEN)
+
+@pytest.fixture(scope="session")
+def model_int8():
+    if not WEIGHTS.exists():
+        pytest.skip("run scripts/export_weights.py first")
+    return GPT2(WEIGHTS, int8=True)

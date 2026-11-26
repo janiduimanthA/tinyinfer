@@ -25,14 +25,15 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="random seed for reproducible output")
     parser.add_argument("--greedy", action="store_true", help="always pick the top token")
     parser.add_argument("--no-cache", action="store_true", help="disable the KV cache (slow, for comparison)")
+    parser.add_argument("--int8", action="store_true", help="use INT8-quantized weights (~4x less memory)")
     args = parser.parse_args()
 
     enc = tiktoken.get_encoding("gpt2")
 
     print("Loading weights...")
     t0 = time.perf_counter()
-    model = GPT2("weights/gpt2.npz")
-    print(f"Loaded in {time.perf_counter() - t0:.1f}s\n")
+    model = GPT2("weights/gpt2.npz", int8=args.int8)
+    print(f"Loaded in {time.perf_counter() - t0:.1f}s ({model.nbytes / 1e6:.0f} MB of weights)\n")
 
     sampling = dict(
         temperature=0.0 if args.greedy else args.temperature,

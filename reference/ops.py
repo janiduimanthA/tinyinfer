@@ -5,6 +5,7 @@ Every function works on the last axis, so it handles any shape (T, C), (B, T, C)
 """
 import numpy as np
 import math
+from reference.quant import QTensor
 
 
 def linear(x, w, b):
@@ -13,7 +14,13 @@ def linear(x, w, b):
 
     GPT-2 stores weights as (in_features, out_features) (Conv1D layout),
     so there is NO transpose here, unlike PyTorch's nn.Linear.
+
+    If w is an INT8 QTensor with one scale per output column, then
+    x @ (q * scale) == (x @ q) * scale, so we scale the OUTPUT (one multiply
+    per output) instead of dequantizing every weight first.
     """
+    if isinstance(w, QTensor):
+        return (x @ w.q) * w.scale + b
     return x @ w + b
 
 
