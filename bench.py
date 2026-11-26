@@ -1,7 +1,7 @@
 """
 Benchmark the NumPy reference engine.
 
-Measures the time of one decode step (one forward pass) at different context
+Measures the time of one decode step (generating one token) at different context
 lengths. Each measurement is warmed up, repeated, and the median is reported,
 because single timings are noisy.
 
@@ -18,15 +18,40 @@ import numpy as np
 
 from reference.gpt2_numpy import GPT2
 
-LENGTHS = [8, 32, 64, 128, 256]
+LENGTHS = [8, 32, 64, 128, 256, 512, 1024]
 REPEATS = 5
 WARMUP = 2
 OUT_PATH = Path("benchmarks/reference_numpy.json")
 
-# Each variant is one way of running a decode step. Add new ones as the engine improves.
+
+# Each variant takes (model, ids) and returns a zero-argument function that runs
+# ONE decode step at context len(ids). Any setup happens outside the timed function.
+
+def full_step(model, ids):
+    return lambda: model.forward(ids)
+
+
+def last_only_step(model, ids):
+    return lambda: model.forward(ids, last_only=True)
+
+
+def kv_cache_step(model, ids):
+    """One decode step with the first T-1 tokens already in the cache."""
+    cache = model.new_cache()
+    model.forward_cached(ids[:-1], cache)  # prefill: setup, not timed
+    prefilled = cache.length
+
+    def step():
+        cache.length = prefilled           # rewind, so every run does the same work
+        model.forward_cached(ids[-1:], cache)
+
+    return step
+
+
 VARIANTS = {
-    "full": lambda model, ids: model.forward(ids),
-    "last_only": lambda model, ids: model.forward(ids, last_only=True),
+    "full": full_step,
+    "last_only": last_only_step,
+    "kv_cache": kv_cache_step,
 }
 
 
@@ -53,8 +78,8 @@ def main():
     for T in LENGTHS:
         ids = rng.integers(0, 50257, size=T)  # random tokens: content doesn't affect speed
         row = {"context": T}
-        for name, fn in VARIANTS.items():
-            row[name] = median_time(lambda: fn(model, ids))
+        for name, make_step in VARIANTS.items():
+            row[name] = median_time(make_step(model, ids))
         results.append(row)
         print(f"{T:>8} | " + " | ".join(f"{row[name]:>16.1f}" for name in VARIANTS))
 
