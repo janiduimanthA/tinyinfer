@@ -55,10 +55,11 @@ def test_linear_with_qtensor_matches_dequantized():
     np.testing.assert_allclose(linear(x, qt, b), x @ qt.dequantize() + b, atol=1e-4)
 
 
-def test_int8_model_is_about_4x_smaller(model, model_int8):
+def test_int8_model_is_about_2x_smaller(model, model_int8):
+    """Blocks are INT8; embeddings (tied lm_head) stay float32 for quality: ~2x overall."""
     ratio = model.nbytes / model_int8.nbytes
     print(f"\n  float32: {model.nbytes / 1e6:.0f} MB, int8: {model_int8.nbytes / 1e6:.0f} MB ({ratio:.2f}x)")
-    assert ratio > 3.5
+    assert ratio > 1.9
 
 
 def test_int8_model_runs(model_int8, golden):

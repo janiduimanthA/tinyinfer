@@ -132,7 +132,8 @@ def block_cached(x, p, n_head, k_cache, v_cache, start):
 class GPT2:
     """GPT-2 (124M) inference engine in pure NumPy."""
 
-    def __init__(self, weights_path="weights/gpt2.npz", n_layer=12, n_head=12, int8=False):
+    def __init__(self, weights_path="weights/gpt2.npz", n_layer=12, n_head=12, int8=False,
+                 int8_blocks=None, int8_embeddings=None):
         w = np.load(weights_path)
         self.n_head = n_head
 
@@ -151,8 +152,13 @@ class GPT2:
                 {k[len(prefix):]: w[k] for k in w.files if k.startswith(prefix)}
             )
 
-        if int8:
+        # int8=True quantizes the block matmuls only. Embeddings (= tied lm_head) stay float32:
+        # the ablation showed INT8 embeddings cost +6% perplexity, INT8 blocks cost ~nothing.
+        int8_blocks = int8 if int8_blocks is None else int8_blocks
+        int8_embeddings = False if int8_embeddings is None else int8_embeddings
+        if int8_embeddings:
             self.wte = quantize(self.wte, axis=0)      # one scale per token row
+        if int8_blocks:
             for p in self.blocks:
                 for key in QUANT_KEYS:
                     p[key] = quantize(p[key], axis=1)  # one scale per output column

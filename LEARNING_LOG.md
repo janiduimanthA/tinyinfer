@@ -87,3 +87,28 @@
 - KV cache trades memory for speed. For big models with many users, the cache can be
   5x bigger than the model → PagedAttention (vLLM), GQA, KV quantization
 - Industry terms: TTFT (time to first token = prefill), TPOT (time per output token = decode)
+
+## Day 5: INT8 quantization
+
+### What I built
+- Symmetric per-channel INT8 weight quantization (QTensor: int8 values + float32 scales)
+- INT8 matmul via (x @ q) * scale: scale the outputs instead of every weight
+- Quality evaluation on 2,044 tokens: perplexity, top-1 agreement, KL divergence, logit diff
+- An ablation study (blocks only / embeddings only / everything)
+- Mixed precision: INT8 blocks + float32 embeddings → 498 → 243 MB, perplexity −1.06%
+- Quality regression tests with thresholds from measured results + safety margin
+
+### Key insights
+- First attempt (everything INT8): 3.9x smaller but +4.98% perplexity, 79% top-1 agreement.
+  The evaluation tool caught it: the generated text still "looked fine"!
+- Never loosen a failing test's threshold to make it pass. Find out why it fails.
+- Ablation found the culprit: the embedding table, which is also the tied lm_head.
+  Its errors directly reorder the next-token ranking. Blocks quantize almost losslessly.
+- My hypothesis (outliers inside the blocks) was half wrong. Measure, don't assume!
+- Raw logit diff is misleading: blocks-only had max diff 52 but 43x lower KL.
+  Softmax ignores shifting all logits together. KL divergence measures what matters.
+- "Greedy text changed" ≠ "quality got worse": one near-tie flips → butterfly effect
+- Per-channel scales isolate outliers within a column; rounding error ≤ scale / 2 (tested)
+- NumPy INT8 is slower (a float32 copy per matmul). Speed needs a native int8 kernel.
+- Decode reads ~498 MB in ~23 ms ≈ 21 GB/s, so it's likely memory-bound
+- Ship the safe fix (mixed precision) now; note the open question (group-wise INT8) for later

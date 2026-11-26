@@ -17,6 +17,56 @@ python scripts/export_weights.py      # one-time: export GPT-2 weights to NumPy
 python generate.py "Sri Lanka is famous for" -n 30
 pytest -v                             # run all tests
 ```
+## INT8 quantization
+
+Weight-only, symmetric, per-channel INT8: `w ≈ q × scale`, with one float32 scale per
+output column, so an outlier weight only affects its own column. INT8 matmuls use
+`(x @ q) × scale`, scaling the outputs instead of every weight.
+
+```bash
+python generate.py "Sri Lanka is famous for" --int8
+python eval_quant.py            # quality, memory and speed vs float32
+python eval_quant.py --ablate   # which parts can be quantized safely?
+```
+
+### Results (2,044 tokens of Tiny Shakespeare)
+
+| | float32 | INT8 (mixed precision) |
+|---|---|---|
+| Weights in memory | 498 MB | **243 MB (2.05x smaller)** |
+| Perplexity | 88.90 | 87.96 (−1.06%) |
+| Top-1 agreement | | 97.46% |
+| KL divergence (mean) | | 0.00135 |
+| Greedy output | | identical to float32 on the test prompt |
+
+### Ablation: why the embeddings stay float32
+
+Quantizing everything first gave a 3.9x smaller model but **+4.98% perplexity and only
+79% top-1 agreement**. Quantizing each part separately found the cause:
+
+| Quantized | Size | Perplexity | Top-1 | KL |
+|---|---|---|---|---|
+| Blocks only | 243 MB | −1.06% | 97.46% | 0.00135 |
+| Embeddings only | 382 MB | +6.14% | 79.25% | 0.05809 |
+| Everything | 128 MB | +4.98% | 79.05% | 0.05955 |
+
+The token embedding table doubles as the output layer (weight tying), so its rounding
+errors directly reorder the next-token ranking. The default `--int8` therefore quantizes
+the block matmuls and keeps embeddings in float32. Next step: group-wise INT8
+(one scale per 32–64 values, like llama.cpp's Q8_0) for the embeddings.
+
+**Lesson learned: raw logit difference is a misleading metric.** "Blocks only" has a
+*larger* max logit difference (52 vs 8) but 43x lower KL divergence. Softmax ignores
+shifting all logits by the same amount, so a big uniform shift is harmless.
+KL divergence measures what actually matters.
+
+### Speed: honest note
+In NumPy, INT8 is slower (95.8 ms vs 23.4 ms per decode step at context 128): NumPy can't
+multiply int8 by float32 directly, so every matmul first makes a temporary float32 copy of
+the weights. The float32 decode step reads ~498 MB in ~23 ms (≈21 GB/s), close to typical
+laptop memory bandwidth, so decoding is likely memory-bound. Smaller weights should pay off
+in a native kernel that reads int8 directly (planned for the C++ engine).
+
 
 ## Benchmarks
 
@@ -55,3 +105,4 @@ Its small gain at long contexts is within this laptop's run-to-run variance
 - Compute lm_head logits only for the last position during generation (up to 1.36x)
 - KV cache with prefill/decode: up to 96x faster per token at 1024 context;
   100-token generation went 5.5 → 21.1 tokens/s end-to-end
+- Mixed-precision INT8 (blocks INT8, embeddings float32): 498 → 243 MB, perplexity −1.06%, top-1 97.46%

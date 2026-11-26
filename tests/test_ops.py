@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from reference.ops import gelu, layer_norm, linear, softmax
+from reference.ops import gelu, layer_norm, linear, log_softmax, softmax
 
 rng = np.random.default_rng(0)
 
@@ -52,3 +53,9 @@ def test_ops_keep_float32():
     assert gelu(x).dtype == np.float32
     assert softmax(x).dtype == np.float32
     assert layer_norm(x, g, b).dtype == np.float32
+
+def test_log_softmax():
+    x = (rng.standard_normal((4, 10)) * 10).astype(np.float32)
+    expected = F.log_softmax(torch.from_numpy(x), dim=-1).numpy()
+    np.testing.assert_allclose(log_softmax(x), expected, atol=1e-5)
+    assert log_softmax(x).dtype == np.float32

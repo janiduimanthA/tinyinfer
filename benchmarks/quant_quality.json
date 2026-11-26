@@ -1,13 +1,15 @@
 {
-  "tokens_evaluated": 2044,
+  "weights_mb": 243.28704,
   "perplexity_fp32": 88.9019546508789,
-  "perplexity_int8": 93.32561492919922,
-  "perplexity_increase_pct": 4.975886408450947,
-  "top1_agreement_pct": 79.052734375,
-  "logit_diff_mean": 1.0763926736884912,
-  "logit_diff_max": 49.75041198730469,
-  "weights_mb_fp32": 497.759232,
-  "weights_mb_int8": 127.69594,
-  "decode_ms_fp32": 26.310000044759363,
-  "decode_ms_int8": 268.9702999778092
+  "perplexity_quant": 87.96233367919922,
+  "perplexity_increase_pct": -1.056918236915727,
+  "top1_agreement_pct": 97.4609375,
+  "kl_mean": 0.0013511641882359982,
+  "logit_diff_mean": 0.9817361612872336,
+  "logit_diff_max": 52.21891784667969,
+  "worst_window": 1,
+  "worst_position": 382,
+  "decode_ms_fp32": 23.357899975962937,
+  "decode_ms_int8": 95.75600002426654,
+  "weights_mb_fp32": 497.759232
 }
