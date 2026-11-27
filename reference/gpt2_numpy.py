@@ -89,7 +89,7 @@ def attention_cached(x, p, n_head, k_cache, v_cache, start):
     Causal self-attention for NEW tokens only, reading past K/V from the cache.
 
     x: (T, C) new tokens at absolute positions start .. start+T-1.
-    k_cache, v_cache: this layer's cache, shape (n_head, block_size, hs). Updated in place.
+    k_cache, v_cache: this layer's cache, shape (n_head, capacity, hs). Updated in place.
     """
     T, C = x.shape
     hs = C // n_head
@@ -125,6 +125,82 @@ def block_cached(x, p, n_head, k_cache, v_cache, start):
     """One transformer block for new tokens, using this layer's KV cache."""
     a = layer_norm(x, p["ln_1.weight"], p["ln_1.bias"])
     x = x + attention_cached(a, p, n_head, k_cache, v_cache, start)
+    x = x + mlp(layer_norm(x, p["ln_2.weight"], p["ln_2.bias"]), p)
+    return x
+
+
+class BatchKVCache:
+    """
+    KV cache for B sequences of DIFFERENT lengths, decoded together.
+
+    Shape (n_layer, B, n_head, capacity, head_size). `lengths[b]` is how many
+    positions sequence b has filled; everything past it is ignored by the mask.
+    """
+
+    def __init__(self, n_layer, batch, n_head, capacity, head_size):
+        shape = (n_layer, batch, n_head, capacity, head_size)
+        self.k = np.zeros(shape, dtype=np.float32)
+        self.v = np.zeros(shape, dtype=np.float32)
+        self.lengths = np.zeros(batch, dtype=np.int64)
+
+    @property
+    def capacity(self):
+        return self.k.shape[3]
+
+    @property
+    def nbytes(self):
+        return self.k.nbytes + self.v.nbytes
+
+
+class _SlotView:
+    """One sequence's slice of a BatchKVCache, shaped like a single KVCache (shares memory)."""
+
+    def __init__(self, cache, b):
+        self.k = cache.k[:, b]  # (n_layer, n_head, capacity, hs): a view, writes go to the batch cache
+        self.v = cache.v[:, b]
+        self.length = int(cache.lengths[b])
+
+
+def attention_batch_decode(x, p, n_head, k_cache, v_cache, pos):
+    """
+    Self-attention for ONE new token per sequence, for B sequences at once.
+
+    x: (B, C), the newest token of each sequence; pos: (B,) their positions.
+    k_cache, v_cache: this layer's cache, shape (B, n_head, capacity, hs). Updated in place.
+    """
+    B, C = x.shape
+    hs = C // n_head
+
+    # 1. Q, K, V for all B new tokens in ONE matmul: the weights are read once, used B times
+    qkv = linear(x, p["attn.c_attn.weight"], p["attn.c_attn.bias"])  # (B, 3C)
+    q, k, v = np.split(qkv, 3, axis=-1)
+    q = q.reshape(B, n_head, 1, hs)
+    k = k.reshape(B, n_head, hs)
+    v = v.reshape(B, n_head, hs)
+
+    # 2. Each sequence writes its new K, V at ITS OWN position
+    rows = np.arange(B)
+    k_cache[rows, :, pos] = k
+    v_cache[rows, :, pos] = v
+
+    # 3. Attend over keys 0 .. longest position; shorter sequences mask out what isn't theirs
+    end = int(pos.max()) + 1
+    K = k_cache[:, :, :end]                                   # (B, n_head, end, hs)
+    V = v_cache[:, :, :end]
+    att = (q @ K.transpose(0, 1, 3, 2)) / math.sqrt(hs)       # (B, n_head, 1, end)
+    mask = np.arange(end)[None, :] > pos[:, None]             # (B, end): True = not this sequence's
+    att = np.where(mask[:, None, None, :], -np.inf, att)
+
+    # 4. Weighted mix of values, merge heads, output projection
+    att = softmax(att)
+    out = (att @ V).reshape(B, C)                             # (B, n_head, 1, hs) -> (B, C)
+    return linear(out, p["attn.c_proj.weight"], p["attn.c_proj.bias"])
+
+
+def block_batch_decode(x, p, n_head, k_cache, v_cache, pos):
+    """One transformer block for one new token per sequence, B sequences at once."""
+    a = layer_norm(x, p["ln_1.weight"], p["ln_1.bias"])
+    x = x + attention_batch_decode(a, p, n_head, k_cache, v_cache, pos)
     x = x + mlp(layer_norm(x, p["ln_2.weight"], p["ln_2.bias"]), p)
     return x
 
@@ -220,8 +296,9 @@ class GPT2:
         ids = np.asarray(ids)
         T = len(ids)
         start = cache.length
-        if start + T > self.block_size:
-            raise ValueError(f"KV cache full: {start} + {T} tokens exceeds block size {self.block_size}")
+        limit = min(self.block_size, cache.k.shape[2])  # model limit, or a smaller cache's capacity
+        if start + T > limit:
+            raise ValueError(f"KV cache full: {start} + {T} tokens exceeds capacity {limit}")
 
         # Positions continue from where the cache left off (NOT from 0!)
         x = self._embed(ids) + self.wpe[np.arange(start, start + T)]
@@ -258,3 +335,64 @@ class GPT2:
     def generate(self, ids, max_new_tokens, **sampling):
         """Return prompt + generated token IDs (greedy unless sampling options are given)."""
         return list(ids) + list(self.stream(ids, max_new_tokens, **sampling))
+
+    # ----- Batching: several sequences at once -----
+
+    def new_batch_cache(self, batch, capacity):
+        """An empty batch KV cache for `batch` sequences of up to `capacity` tokens each."""
+        head_size = self.wte.shape[1] // self.n_head
+        return BatchKVCache(len(self.blocks), batch, self.n_head, capacity, head_size)
+
+    def prefill_slot(self, ids, cache, b):
+        """Prefill sequence b's prompt into its slot of a BatchKVCache. Returns (1, vocab) logits."""
+        view = _SlotView(cache, b)
+        logits = self.forward_cached(ids, view)
+        cache.lengths[b] = view.length
+        return logits
+
+    def forward_batch_decode(self, ids, cache):
+        """
+        One decode step for B sequences at once.
+
+        ids: (B,) the newest token of each sequence -> logits (B, vocab).
+        Each sequence continues from its own position, cache.lengths[b].
+        """
+        ids = np.asarray(ids)
+        pos = cache.lengths.copy()                     # each sequence's next position
+        if (pos >= cache.capacity).any():
+            raise ValueError("batch KV cache full")
+
+        x = self._embed(ids) + self.wpe[pos]           # (B, C)
+        for layer, p in enumerate(self.blocks):
+            x = block_batch_decode(x, p, self.n_head, cache.k[layer], cache.v[layer], pos)
+        cache.lengths = pos + 1
+
+        x = layer_norm(x, self.ln_f_g, self.ln_f_b)
+        return self._lm_head(x)                        # (B, vocab)
+
+    def generate_batch(self, prompts, max_new_tokens, temperature=0.0, top_k=None,
+                       top_p=None, seed=None):
+        """
+        Generate for several prompts (any lengths) at once.
+
+        1. Prefill: each prompt separately into its own cache slot (lengths differ)
+        2. Decode:  all sequences together, one token each per step
+        Returns a list of (prompt + generated) token ID lists.
+        """
+        B = len(prompts)
+        capacity = max(len(p) for p in prompts) + max_new_tokens
+        if capacity > self.block_size:
+            raise ValueError(f"prompt + {max_new_tokens} new tokens exceeds block size {self.block_size}")
+
+        cache = self.new_batch_cache(B, capacity)
+        rng = np.random.default_rng(seed)
+        outs = [list(p) for p in prompts]
+
+        logits = np.concatenate([self.prefill_slot(p, cache, b) for b, p in enumerate(prompts)])
+        for step in range(max_new_tokens):
+            next_ids = [sample_next(logits[b], temperature, top_k, top_p, rng) for b in range(B)]
+            for b in range(B):
+                outs[b].append(next_ids[b])
+            if step < max_new_tokens - 1:              # no need to process the very last token
+                logits = self.forward_batch_decode(next_ids, cache)
+        return outs
