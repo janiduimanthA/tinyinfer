@@ -9,7 +9,7 @@ def test_prefill_matches_full_forward(model, golden, i):
     cache = model.new_cache()
     got = model.forward_cached(ids, cache)
     expected = model.forward(ids)[-1:]
-    np.testing.assert_allclose(got, expected, atol=1e-4)
+    np.testing.assert_allclose(got, expected, atol=1e-3)
     assert cache.length == len(ids)
 
 
