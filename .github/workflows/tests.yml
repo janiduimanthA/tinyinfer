@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Cache exported GPT-2 weights
+        id: weights
+        uses: actions/cache@v5
+        with:
+          path: weights
+          key: gpt2-weights-${{ hashFiles('scripts/export_weights.py') }}
+
+      - name: Export GPT-2 weights
+        if: steps.weights.outputs.cache-hit != 'true'
+        run: python scripts/export_weights.py
+
+      - name: Download eval text
+        run: |
+          mkdir -p data
+          curl -sSL -o data/tinyshakespeare.txt https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
+
+      - name: Run tests
+        run: pytest -v
