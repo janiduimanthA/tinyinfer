@@ -112,3 +112,26 @@
 - NumPy INT8 is slower (a float32 copy per matmul). Speed needs a native int8 kernel.
 - Decode reads ~498 MB in ~23 ms ≈ 21 GB/s, so it's likely memory-bound
 - Ship the safe fix (mixed precision) now; note the open question (group-wise INT8) for later
+
+## Day 6: Batching
+
+### What I built
+- BatchKVCache: one cache slot per sequence, each with its own length
+- Prefill each prompt separately (reusing forward_cached through a slot view),
+  then decode all sequences together with per-sequence positions and masks
+- Tests: batched logits vs separate forwards (prompts of 5, 25, 2 tokens),
+  batched == one-by-one generation, batched == Hugging Face golden, INT8 + batching
+- Batch benchmark (throughput + latency) and a matmul micro-benchmark
+
+### Key insights
+- Batching works because decoding is memory-bound: one weight read serves B tokens
+- Throughput (company cares) vs latency (user cares): batch 8 gave 4.6x throughput
+  for 1.75x latency; batch 16 gave 5.3x throughput but 3x latency
+- My first demo showed only 1.2x. A single unwarmed run that included prefill is not a benchmark
+- Hypothesis confirmed by micro-benchmark: B=1 uses gemv (fast); B≥2 switches to gemm,
+  which packs (copies) the weights. 2.3-2.9x jump at B=2, then nearly flat up to B=8.
+- lm_head streams 154 MB in 5.85 ms ≈ 26 GB/s: second independent confirmation
+  (after Day 5's ~21.6 GB/s estimate) that decode is memory-bandwidth bound
+- Micro-benchmarks can lie too: small matrices stay in CPU cache when re-run
+- Correct algorithm + bad kernels = little speedup. Real engines write kernels for skinny matmuls.
+- Slot-based design is ready for continuous batching (vLLM-style): refill a finished slot
